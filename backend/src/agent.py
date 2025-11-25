@@ -1,14 +1,13 @@
 import logging
 import json
 import os
-import asyncio
-from datetime import datetime
-from typing import Annotated, Literal, List, Optional
-from dataclasses import dataclass, field, asdict
+from typing import Annotated, Literal, Optional, Dict, List, cast
+from dataclasses import dataclass
 
-print("\n" + "🌿" * 50)
+print("\n" + "🧬" * 5)
+print("🚀 Soft Computing Tutor")
 print("💡 agent.py LOADED SUCCESSFULLY!")
-print("🌿" * 50 + "\n")
+print("🧬" * 50 + "\n")
 
 from dotenv import load_dotenv
 from pydantic import Field
@@ -20,189 +19,186 @@ from livekit.agents import (
     RoomInputOptions,
     WorkerOptions,
     cli,
-    metrics,
-    MetricsCollectedEvent,
-    RunContext,
     function_tool,
+    RunContext,
 )
 
+# 🔌 PLUGINS
 from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 logger = logging.getLogger("agent")
 load_dotenv(".env.local")
 
-# ======================================================
-# 🧠 STATE MANAGEMENT & DATA STRUCTURES
-# ======================================================
+
+# 🆕 Renamed file so it generates fresh data for you
+CONTENT_FILE = "soft_computing.json" 
+
+
+DEFAULT_CONTENT = [
+  {
+    "id": "fuzzy_logic",
+    "title": "Fuzzy Logic",
+    "summary": "Fuzzy logic is a mathematical framework for dealing with uncertainty and approximate reasoning, allowing values between true and false.",
+    "sample_question": "What is fuzzy logic and how does it differ from classical binary logic?"
+  },
+  {
+    "id": "neural_networks",
+    "title": "Neural Networks",
+    "summary": "Neural networks are computational models inspired by the human brain, used in pattern recognition and machine learning.",
+    "sample_question": "Describe how a neural network learns from data."
+  },
+  {
+    "id": "genetic_algorithms",
+    "title": "Genetic Algorithms",
+    "summary": "Genetic algorithms are optimization techniques inspired by the process of natural selection, used to solve complex problems.",
+    "sample_question": "What are the main steps in a genetic algorithm?"
+  },
+  {
+    "id": "soft_computing_features",
+    "title": "Soft Computing Features",
+    "summary": "Soft Computing deals with approximate solutions, tolerance for imprecision, and the ability to handle uncertainty, unlike traditional hard computing.",
+    "sample_question": "List some key differences between soft computing and hard computing."
+  }
+]
+
+
+def load_content() -> List[Dict[str, str]]:
+    """
+    📖 Checks if Soft Computing JSON exists. 
+    If NO: Generates it from DEFAULT_CONTENT.
+    If YES: Loads it.
+    """
+    try:
+        path = os.path.join(os.path.dirname(__file__), CONTENT_FILE)
+        
+        # Check if file exists
+        if not os.path.exists(path):
+            print(f"⚠️ {CONTENT_FILE} not found. Generating Soft Computing content data...")
+            with open(path, "w", encoding='utf-8') as f:
+                json.dump(DEFAULT_CONTENT, f, indent=4)
+            print("✅ Soft Computing content file created successfully.")
+            
+        # Read the file
+        with open(path, "r", encoding='utf-8') as f:
+            data: List[Dict[str, str]] = json.load(f)
+            return data
+            
+    except Exception as e:
+        print(f"⚠️ Error managing content file: {e}")
+        return []
+
+# Load data immediately on startup
+COURSE_CONTENT: List[Dict[str, str]] = load_content()
+
+
 
 @dataclass
-class CheckInState:
-    """🌿 Holds data for the CURRENT daily check-in"""
-    mood: str | None = None
-    energy: str | None = None
-    objectives: list[str] = field(default_factory=list)
-    advice_given: str | None = None
+class TutorState:
+    """🧠 Tracks the current learning context"""
+    current_topic_id: str | None = None
+    current_topic_data: Dict[str, str] | None = None
+    mode: Literal["learn", "quiz", "teach_back"] = "learn"
     
-    def is_complete(self) -> bool:
-        """✅ Check if we have the core check-in data"""
-        return all([
-            self.mood is not None,
-            self.energy is not None,
-            len(self.objectives) > 0
-        ])
-    
-    def to_dict(self) -> dict:
-        return asdict(self)
+    def set_topic(self, topic_id: str) -> bool:
+        # Find topic in loaded content
+        topic: Dict[str, str] | None = next((item for item in COURSE_CONTENT if item["id"] == topic_id), None)
+        if topic:
+            self.current_topic_id = topic_id
+            self.current_topic_data = topic
+            return True
+        return False
 
 @dataclass
 class Userdata:
-    """👤 User session data passed to the agent"""
-    current_checkin: CheckInState
-    history_summary: str  # String containing info about previous sessions
-    session_start: datetime = field(default_factory=datetime.now)
+    tutor_state: TutorState
+    agent_session: Optional[AgentSession["Userdata"]] = None 
 
-# ======================================================
-# 💾 PERSISTENCE LAYERS (JSON LOGGING)
-# ======================================================
-WELLNESS_LOG_FILE = "wellness_log.json"
-
-def get_log_path():
-    base_dir = os.path.dirname(__file__)
-    backend_dir = os.path.abspath(os.path.join(base_dir, ".."))
-    return os.path.join(backend_dir, WELLNESS_LOG_FILE)
-
-def load_history() -> list:
-    """📖 Read previous check-ins from JSON"""
-    path = get_log_path()
-    if not os.path.exists(path):
-        return []
-    try:
-        with open(path, "r", encoding='utf-8') as f:
-            data = json.load(f)
-            return data if isinstance(data, list) else []
-    except Exception as e:
-        print(f"⚠️ Could not load history: {e}")
-        return []
-
-def save_checkin_entry(entry: CheckInState) -> None:
-    """💾 Append new check-in to the JSON list"""
-    path = get_log_path()
-    history = load_history()
-    
-    # Create record
-    record = {
-        "timestamp": datetime.now().isoformat(),
-        "mood": entry.mood,
-        "energy": entry.energy,
-        "objectives": entry.objectives,
-        "summary": entry.advice_given
-    }
-    
-    history.append(record)
-    
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding='utf-8') as f:
-        json.dump(history, f, indent=4, ensure_ascii=False)
-        
-    print(f"\n✅ CHECK-IN SAVED TO {path}")
-
-# ======================================================
-# 🛠️ WELLNESS AGENT TOOLS
-# ======================================================
 
 @function_tool
-async def record_mood_and_energy(
-    ctx: RunContext[Userdata],
-    mood: Annotated[str, Field(description="The user's emotional state (e.g., happy, stressed, anxious)")],
-    energy: Annotated[str, Field(description="The user's energy level (e.g., high, low, drained, energetic)")],
+async def select_topic(
+    ctx: RunContext[Userdata], 
+    topic_id: Annotated[str, Field(description="The ID of the topic to study (e.g., 'dna', 'cell', 'nucleus')")]
 ) -> str:
-    """📝 Record how the user is feeling. Call this after the user describes their state."""
-    ctx.userdata.current_checkin.mood = mood
-    ctx.userdata.current_checkin.energy = energy
+    """📚 Selects a topic to study from the available list."""
+    state = ctx.userdata.tutor_state
+    success = state.set_topic(topic_id.lower())
     
-    print(f"📊 MOOD LOGGED: {mood} | ENERGY: {energy}")
-    
-    return f"I've noted that you are feeling {mood} with {energy} energy. I'm listening."
+    if success and state.current_topic_data:
+        return f"Topic set to {state.current_topic_data['title']}. Ask the user if they want to 'Learn', be 'Quizzed', or 'Teach it back'."
+    else:
+        available = ", ".join([t["id"] for t in COURSE_CONTENT])
+        return f"Topic not found. Available topics are: {available}"
 
 @function_tool
-async def record_objectives(
-    ctx: RunContext[Userdata],
-    objectives: Annotated[list[str], Field(description="List of 1-3 specific goals the user wants to achieve today")],
+async def set_learning_mode(
+    ctx: RunContext[Userdata], 
+    mode: Annotated[str, Field(description="The mode to switch to: 'learn', 'quiz', or 'teach_back'")]
 ) -> str:
-    """🎯 Record the user's daily goals. Call this when user states what they want to do."""
-    ctx.userdata.current_checkin.objectives = objectives
-    print(f"🎯 OBJECTIVES LOGGED: {objectives}")
-    return "I've written down your goals for the day."
+    """🔄 Switches the interaction mode and updates the agent's voice/persona."""
+    
+    # 1. Update State
+    state = ctx.userdata.tutor_state
+    mode_lower = mode.lower()
+    if mode_lower not in ["learn", "quiz", "teach_back"]:
+        return "Invalid mode. Use 'learn', 'quiz', or 'teach_back'."
+    state.mode = cast(Literal["learn", "quiz", "teach_back"], mode_lower)
+    
+    # 2. Switch Voice based on Mode
+    agent_session = ctx.userdata.agent_session 
+    
+    if agent_session and state.current_topic_data:
+        if state.mode == "learn":
+            # 👨‍🏫 MATTHEW: The Lecturer
+            # Voice switching removed due to API limitations
+            instruction = f"Mode: LEARN. Explain: {state.current_topic_data['summary']}"
+            
+        elif state.mode == "quiz":
+            # 👩‍🏫 ALICIA: The Examiner
+            # Voice switching removed due to API limitations
+            instruction = f"Mode: QUIZ. Ask this question: {state.current_topic_data['sample_question']}"
+            
+        elif state.mode == "teach_back":
+            # 👨‍🎓 KEN: The Student/Coach
+            # Voice switching removed due to API limitations
+            instruction = "Mode: TEACH_BACK. Ask the user to explain the concept to you as if YOU are the beginner."
+        else:
+            return "Invalid mode."
+    else:
+        instruction = "Voice switch failed (Session not found or no topic selected)."
+
+    print(f"🔄 SWITCHING MODE -> {state.mode.upper()}")
+    return f"Switched to {state.mode} mode. {instruction}"
 
 @function_tool
-async def complete_checkin(
+async def evaluate_teaching(
     ctx: RunContext[Userdata],
-    final_advice_summary: Annotated[str, Field(description="A brief 1-sentence summary of the advice given")],
+    user_explanation: Annotated[str, Field(description="The explanation given by the user during teach-back")]
 ) -> str:
-    """💾 Finalize the session, provide a recap, and save to JSON. Call at the very end."""
-    state = ctx.userdata.current_checkin
-    state.advice_given = final_advice_summary
-    
-    if not state.is_complete():
-        return "I can't finish yet. I still need to know your mood, energy, or at least one goal."
-
-    # Save to JSON
-    save_checkin_entry(state)
-    
-    print("\n" + "⭐" * 60)
-    print("🎉 WELLNESS CHECK-IN COMPLETED!")
-    print(f"💭 Mood: {state.mood}")
-    print(f"🎯 Goals: {state.objectives}")
-    print("⭐" * 60 + "\n")
-
-    recap = f"""
-    Here is your recap for today:
-    You are feeling {state.mood} and your energy is {state.energy}.
-    Your main goals are: {', '.join(state.objectives)}.
-    
-    Remember: {final_advice_summary}
-    
-    I've saved this in your wellness log. Have a wonderful day!
-    """
-    return recap
+    """📝 call this when the user has finished explaining a concept in 'teach_back' mode."""
+    print(f"📝 EVALUATING EXPLANATION: {user_explanation}")
+    return "Analyze the user's explanation. Give them a score out of 10 on accuracy and clarity, and correct any mistakes."
 
 
-
-class WellnessAgent(Agent):
-    def __init__(self, history_context: str):
+class TutorAgent(Agent):
+    def __init__(self):
         super().__init__(
-            instructions=f"""
-            You are a compassionate, supportive Daily Wellness Companion.
+            instructions="""
+            You are a Soft Computing Tutor. Help users learn concepts like Fuzzy Logic, Neural Networks, and Genetic Algorithms.
             
-            🧠 **CONTEXT FROM PREVIOUS SESSIONS:**
-            {history_context}
+            🎯 **YOUR ROLE:**
+            - Ask what topic they want to study
+            - Use tools to select topics and switch learning modes
+            - Provide clear, engaging explanations
             
-            🎯 **GOALS FOR THIS SESSION:**
-            1. **Check-in:** Ask how they are feeling (Mood) and their energy levels.
-               - *Reference the history context if available (e.g., "Last time you were tired, how is today?").*
-            2. **Intentions:** Ask for 1-3 simple objectives for the day.
-            3. **Support:** Offer small, grounded, NON-MEDICAL advice.
-               - Example: "Try a 5-minute walk" or "Break that big task into small steps."
-            4. **Recap & Save:** Summarize their mood and goals, then call 'complete_checkin'.
-
-            🚫 **SAFETY GUARDRAILS:**
-            - You are NOT a doctor or therapist.
-            - Do NOT diagnose conditions or prescribe treatments.
-            - If a user mentions self-harm or severe crisis, gently suggest professional help immediately.
-
-            🛠️ **Use the tools to record data as the user speaks.**
+            📚 **MODES:**
+            - LEARN: Explain concepts clearly
+            - QUIZ: Test their knowledge  
+            - TEACH_BACK: Let them explain to you
             """,
-            tools=[
-                record_mood_and_energy,
-                record_objectives,
-                complete_checkin,
-            ],
+            tools=[select_topic, set_learning_mode, evaluate_teaching],
         )
 
-# ======================================================
-# 🎬 ENTRYPOINT & INITIALIZATION
-# ======================================================
 
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
@@ -210,51 +206,53 @@ def prewarm(proc: JobProcess):
 async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {"room": ctx.room.name}
 
-    print("\n" + "🌿" * 25)
-    print("🚀 STARTING WELLNESS SESSION")
-    print("👨‍⚕️ Tutorial by Dr. Abhishek")
+    print("🚀 Starting Soft Computing Session")
+    print(f"📚 Loaded {len(COURSE_CONTENT)} topics from Knowledge Base")
     
-    # 1. Load History from JSON
-    history = load_history()
-    history_summary = "No previous history found. This is the first session."
-    
-    if history:
-        last_entry = history[-1]
-        history_summary = (
-            f"Last check-in was on {last_entry.get('timestamp', 'unknown date')}. "
-            f"User felt {last_entry.get('mood')} with {last_entry.get('energy')} energy. "
-            f"Their goals were: {', '.join(last_entry.get('objectives', []))}."
+    # 1. Initialize State
+    userdata = Userdata(tutor_state=TutorState())
+
+    # 2. Setup Agent
+    try:
+        # Try Murf TTS first
+        tts_engine = murf.TTS(
+            voice="en-US-matthew", 
+            style="Promo",        
+            text_pacing=True,
         )
-        print("📜 HISTORY LOADED:", history_summary)
-    else:
-        print("📜 NO HISTORY FOUND.")
-
-    # 2. Initialize Session Data
-    userdata = Userdata(
-        current_checkin=CheckInState(),
-        history_summary=history_summary
-    )
-
-    # 3. Setup Agent
+    except Exception as e:
+        print(f"⚠️ Murf TTS failed, using Silero: {e}")
+        tts_engine = silero.TTS()
+    
     session = AgentSession(
         stt=deepgram.STT(model="nova-3"),
         llm=google.LLM(model="gemini-2.5-flash"),
-        tts=murf.TTS(
-            voice="en-US-ryan",
-            style="Conversational",
-        ),
+        tts=tts_engine,
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
         userdata=userdata,
     )
     
+    # 3. Store session in userdata for tools to access
+    userdata.agent_session = session
+    
     # 4. Start
-    await session.start(
-        agent=WellnessAgent(history_context=history_summary),
-        room=ctx.room,
-    )
-
-    await ctx.connect()
+    try:
+        await session.start(
+            agent=TutorAgent(),
+            room=ctx.room,
+            room_input_options=RoomInputOptions(
+                noise_cancellation=noise_cancellation.BVC()
+            ),
+        )
+        
+        print("✅ Agent session started successfully")
+        await ctx.connect()
+        print("✅ Connected to LiveKit room")
+        
+    except Exception as e:
+        print(f"❌ Failed to start agent session: {e}")
+        raise
 
 if __name__ == "__main__":
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
