@@ -7,7 +7,7 @@ from typing import Annotated, Literal, Optional, Dict, List
 from dataclasses import dataclass, field
 
 print("\n" + "=" * 50)
-print("Razorpay SDR Agent")
+print("Fraud Alert Voice Agent")
 print("agent.py LOADED SUCCESSFULLY!")
 print("=" * 50 + "\n")
 
@@ -31,323 +31,217 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 logger = logging.getLogger("agent")
 load_dotenv(".env.local")
 
-FAQ_FILE = "razorpay_faq.json"
-LEADS_FILE = "leads.json"
-MEETINGS_FILE = "meetings.json"
-CALL_NOTES_FILE = "call_notes.json"
-EMAILS_FILE = "follow_up_emails.json"
+FRAUD_CASES_FILE = "fraud_cases.json"
 
-def load_faq() -> Dict:
-    """Load Razorpay FAQ data"""
+def load_fraud_cases() -> List[Dict]:
+    """Load fraud cases data"""
     try:
-        path = os.path.join(os.path.dirname(__file__), FAQ_FILE)
+        path = os.path.join(os.path.dirname(__file__), FRAUD_CASES_FILE)
         with open(path, "r", encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
-        print(f"Error loading FAQ: {e}")
-        return {"company": {}, "faq": []}
+        print(f"Error loading fraud cases: {e}")
+        return []
 
-def save_lead(lead_data: Dict):
-    """Save lead data to JSON file"""
+def save_fraud_cases(cases: List[Dict]):
+    """Save updated fraud cases to JSON file"""
     try:
-        path = os.path.join(os.path.dirname(__file__), LEADS_FILE)
-        leads = []
-        
-        if os.path.exists(path):
-            with open(path, "r", encoding='utf-8') as f:
-                leads = json.load(f)
-        
-        leads.append(lead_data)
-        
+        path = os.path.join(os.path.dirname(__file__), FRAUD_CASES_FILE)
         with open(path, "w", encoding='utf-8') as f:
-            json.dump(leads, f, indent=2)
-        
-        print(f"Lead saved: {lead_data.get('name', 'Unknown')}")
+            json.dump(cases, f, indent=2)
+        print("Fraud cases updated successfully")
     except Exception as e:
-        print(f"Error saving lead: {e}")
+        print(f"Error saving fraud cases: {e}")
 
-FAQ_DATA = load_faq()
-
-@dataclass
-class LeadInfo:
-    name: str = ""
-    company: str = ""
-    email: str = ""
-    role: str = ""
-    use_case: str = ""
-    team_size: str = ""
-    timeline: str = ""
-    
-    def is_complete(self) -> bool:
-        return all([self.name, self.company, self.email, self.role])
+FRAUD_CASES = load_fraud_cases()
 
 @dataclass
-class SDRState:
-    lead: LeadInfo = field(default_factory=LeadInfo)
-    conversation_stage: Literal["greeting", "discovery", "faq", "qualification", "closing"] = "greeting"
+class FraudCase:
+    userName: str = ""
+    securityIdentifier: str = ""
+    cardEnding: str = ""
+    case: str = "pending_review"
+    transactionName: str = ""
+    transactionTime: str = ""
+    transactionCategory: str = ""
+    transactionSource: str = ""
+    transactionAmount: str = ""
+    transactionLocation: str = ""
+    securityQuestion1: str = ""
+    securityAnswer1: str = ""
+    securityQuestion2: str = ""
+    securityAnswer2: str = ""
+
+@dataclass
+class FraudState:
+    current_case: Optional[FraudCase] = None
+    conversation_stage: Literal["greeting", "username_collection", "verification1", "verification2", "transaction_review", "decision", "closing"] = "greeting"
+    verification1_passed: bool = False
+    verification2_passed: bool = False
     call_ended: bool = False
-    persona: str = "unknown"
-    conversation_transcript: List[str] = field(default_factory=list)
-    pain_points: List[str] = field(default_factory=list)
+    user_name: str = ""
 
 @dataclass
 class Userdata:
-    sdr_state: SDRState
+    fraud_state: FraudState
     agent_session: Optional[AgentSession] = None
 
 @function_tool
-async def search_faq(
+async def collect_username(
     ctx: RunContext[Userdata],
-    query: Annotated[str, Field(description="User's question about Razorpay")]
+    username: Annotated[str, Field(description="The customer's name provided for fraud case lookup")]
 ) -> str:
-    """Search FAQ for relevant answers about Razorpay"""
-    query_lower = query.lower()
+    """Collect username and load corresponding fraud case"""
+    state = ctx.userdata.fraud_state
+    state.user_name = username
     
-    for faq_item in FAQ_DATA["faq"]:
-        question = faq_item["question"].lower()
-        answer = faq_item["answer"]
-        
-        # Simple keyword matching
-        if any(word in question for word in query_lower.split()) or any(word in query_lower for word in question.split()):
-            return f"Based on our FAQ: {answer}"
+    # Find fraud case for this user
+    for case_data in FRAUD_CASES:
+        if case_data["userName"].lower() == username.lower():
+            state.current_case = FraudCase(**case_data)
+            state.conversation_stage = "verification1"
+            return f"Thank you, {username}. For security purposes, I need to verify your identity. Can you please provide your security identifier?"
     
-    # If no direct match, return general company info
-    company = FAQ_DATA["company"]
-    return f"I'd be happy to help! {company['description']}. Could you be more specific about what you'd like to know about Razorpay?"
+    return f"I'm sorry, I don't find any fraud alerts for the name {username}. Could you please double-check the spelling or provide the name exactly as it appears on your account?"
 
 @function_tool
-async def collect_lead_info(
+async def verify_identity(
     ctx: RunContext[Userdata],
-    field: Annotated[str, Field(description="The field to update: name, company, email, role, use_case, team_size, or timeline")],
-    value: Annotated[str, Field(description="The value provided by the user")]
+    answer: Annotated[str, Field(description="The customer's answer to the security question or identifier")]
 ) -> str:
-    """Collect and store lead information"""
-    state = ctx.userdata.sdr_state
+    """Verify customer identity using security identifier and personal question"""
+    state = ctx.userdata.fraud_state
     
-    if hasattr(state.lead, field):
-        setattr(state.lead, field, value)
-        print(f"Updated {field}: {value}")
-        
-        # Check what's still needed
-        missing = []
-        if not state.lead.name: missing.append("name")
-        if not state.lead.company: missing.append("company")
-        if not state.lead.email: missing.append("email")
-        if not state.lead.role: missing.append("role")
-        
-        if missing:
-            return f"Got it! I still need your {', '.join(missing)}."
+    if not state.current_case:
+        return "I need to collect your name first before we can proceed with verification."
+    
+    if state.conversation_stage == "verification1":
+        if answer.strip() == state.current_case.securityIdentifier:
+            state.verification1_passed = True
+            state.conversation_stage = "verification2"
+            return f"Thank you. Now for a security question: {state.current_case.securityQuestion1}"
         else:
-            return "Perfect! I have all the key information. Is there anything else about Razorpay you'd like to know?"
+            state.conversation_stage = "closing"
+            return "I'm sorry, but that security identifier doesn't match our records. For your security, I cannot proceed with this call. Please contact our customer service line directly. Thank you."
     
-    return "I couldn't update that information. Please try again."
+    elif state.conversation_stage == "verification2":
+        if answer.lower().strip() == state.current_case.securityAnswer1.lower().strip():
+            state.verification2_passed = True
+            state.conversation_stage = "transaction_review"
+            case = state.current_case
+            return f"Perfect! Identity verified. I'm calling about a suspicious transaction on your card ending in {case.cardEnding}. On {case.transactionTime}, there was a charge of {case.transactionAmount} to {case.transactionName} from {case.transactionSource} in {case.transactionLocation}. Did you make this transaction?"
+        else:
+            state.conversation_stage = "closing"
+            return "I'm sorry, but that answer doesn't match our records. For your security, I cannot proceed with this call. Please contact our customer service line directly. Thank you."
+    
+    return "Please provide the requested information to proceed."
+
 
 @function_tool
-async def book_meeting(
+async def mark_transaction_decision(
     ctx: RunContext[Userdata],
-    preferred_time: Annotated[str, Field(description="User's preferred meeting time (e.g., 'tomorrow 2pm', 'next week')")] = ""
+    decision: Annotated[str, Field(description="Customer's decision: 'yes' if they made the transaction, 'no' if they didn't")]
 ) -> str:
-    """Book a demo meeting with available time slots"""
-    # Mock available slots
-    now = datetime.now()
-    slots = [
-        (now + timedelta(days=1)).strftime("%Y-%m-%d 2:00 PM"),
-        (now + timedelta(days=2)).strftime("%Y-%m-%d 10:00 AM"),
-        (now + timedelta(days=3)).strftime("%Y-%m-%d 3:00 PM")
-    ]
+    """Mark the fraud case based on customer's decision"""
+    state = ctx.userdata.fraud_state
     
-    if not preferred_time:
-        return f"I'd love to schedule a demo! Here are some available slots: {', '.join(slots)}. Which works best for you?"
+    if not (state.verification1_passed and state.verification2_passed):
+        return "I need to verify your identity with both security questions first before we can proceed."
     
-    # Book the meeting
-    lead = ctx.userdata.sdr_state.lead
-    meeting_data = {
-        "name": lead.name,
-        "email": lead.email,
-        "company": lead.company,
-        "requested_time": preferred_time,
-        "booked_slot": slots[0],  # Default to first slot
-        "timestamp": datetime.now().isoformat()
-    }
+    if not state.current_case:
+        return "No fraud case found to update."
     
-    try:
-        path = os.path.join(os.path.dirname(__file__), MEETINGS_FILE)
-        meetings = []
-        if os.path.exists(path):
-            with open(path, "r") as f:
-                meetings = json.load(f)
-        meetings.append(meeting_data)
-        with open(path, "w") as f:
-            json.dump(meetings, f, indent=2)
-    except Exception as e:
-        print(f"Error saving meeting: {e}")
+    decision_lower = decision.lower().strip()
     
-    return f"Perfect! I've booked your demo for {meeting_data['booked_slot']}. You'll receive a calendar invite at {lead.email}."
-
-@function_tool
-async def detect_persona(
-    ctx: RunContext[Userdata],
-    user_message: Annotated[str, Field(description="User's recent message to analyze for persona")]
-) -> str:
-    """Detect user persona and adapt pitch"""
-    state = ctx.userdata.sdr_state
-    msg_lower = user_message.lower()
-    
-    # Simple persona detection
-    if any(word in msg_lower for word in ["code", "api", "integrate", "developer", "technical"]):
-        state.persona = "developer"
-        return "I can see you're technically focused! Let me highlight Razorpay's developer-friendly features: easy API integration, comprehensive SDKs, and detailed documentation."
-    elif any(word in msg_lower for word in ["product", "feature", "roadmap", "user"]):
-        state.persona = "product_manager"
-        return "As a product person, you'll appreciate our feature-rich platform, analytics dashboard, and how we help improve conversion rates."
-    elif any(word in msg_lower for word in ["founder", "startup", "business", "growth"]):
-        state.persona = "founder"
-        return "Perfect! As a founder, you need reliable payments that scale. Razorpay handles everything from small transactions to enterprise volumes."
+    if decision_lower in ['yes', 'y', 'correct', 'i made it', 'that was me']:
+        # Mark as safe
+        state.current_case.case = "confirmed_safe"
+        outcome = "safe"
+        response = f"Thank you for confirming. I've marked this transaction as legitimate in our system. Your card ending in {state.current_case.cardEnding} remains active. Is there anything else I can help you with today?"
+    elif decision_lower in ['no', 'n', 'incorrect', 'i did not make it', 'that was not me', 'fraud']:
+        # Mark as fraudulent
+        state.current_case.case = "confirmed_fraud"
+        outcome = "fraudulent"
+        response = f"I understand. I've immediately blocked your card ending in {state.current_case.cardEnding} to prevent further unauthorized charges. We'll issue you a new card within 3-5 business days and reverse this fraudulent charge of {state.current_case.transactionAmount}. You'll receive a confirmation email shortly."
     else:
-        state.persona = "business_user"
-        return "I'll focus on how Razorpay can streamline your payment processes and improve your business operations."
-
-@function_tool
-async def track_pain_point(
-    ctx: RunContext[Userdata],
-    pain_point: Annotated[str, Field(description="A business challenge or pain point mentioned by the user")]
-) -> str:
-    """Track user's pain points for better qualification"""
-    state = ctx.userdata.sdr_state
-    state.pain_points.append(pain_point)
-    return f"I understand that {pain_point} is a challenge for you. Let me explain how Razorpay addresses this specific issue."
-
-@function_tool
-async def check_returning_visitor(
-    ctx: RunContext[Userdata],
-    email: Annotated[str, Field(description="User's email to check against previous leads")]
-) -> str:
-    """Check if user is a returning visitor"""
-    try:
-        path = os.path.join(os.path.dirname(__file__), LEADS_FILE)
-        if os.path.exists(path):
-            with open(path, "r") as f:
-                leads = json.load(f)
-            
-            for lead in leads:
-                if lead.get("email", "").lower() == email.lower():
-                    return f"Welcome back! I see you were interested in {lead.get('use_case', 'our payment solutions')} last time. How can I help you today?"
-    except Exception as e:
-        print(f"Error checking returning visitor: {e}")
+        return "I need a clear yes or no answer. Did you make this transaction?"
     
-    return "Great to meet you! I don't see any previous conversations, so let's start fresh."
+    # Update the fraud case in the database
+    updated_cases = []
+    for case in FRAUD_CASES:
+        if (case["userName"] == state.current_case.userName and 
+            case["securityIdentifier"] == state.current_case.securityIdentifier):
+            case["case"] = state.current_case.case
+            case["outcome_timestamp"] = datetime.now().isoformat()
+            case["outcome_note"] = f"Customer {outcome} transaction via phone verification"
+        updated_cases.append(case)
+    
+    save_fraud_cases(updated_cases)
+    state.conversation_stage = "closing"
+    
+    print(f"Fraud case updated: {state.current_case.userName} - {outcome}")
+    return response
 
 @function_tool
-async def end_call_summary(
+async def end_fraud_call(
     ctx: RunContext[Userdata]
 ) -> str:
-    """Generate end-of-call summary and save lead"""
-    state = ctx.userdata.sdr_state
-    lead = state.lead
-    
-    # Save to JSON
-    lead_data = {
-        "name": lead.name,
-        "company": lead.company,
-        "email": lead.email,
-        "role": lead.role,
-        "use_case": lead.use_case,
-        "team_size": lead.team_size,
-        "timeline": lead.timeline,
-        "timestamp": asyncio.get_event_loop().time()
-    }
-    
-    save_lead(lead_data)
+    """End the fraud alert call with appropriate closing"""
+    state = ctx.userdata.fraud_state
     state.call_ended = True
     
-    summary = f"Thank you {lead.name}! Here's a quick summary: You're {lead.role} at {lead.company}, interested in {lead.use_case or 'our payment solutions'}. "
+    if state.current_case and state.verification1_passed and state.verification2_passed:
+        if state.current_case.case == "confirmed_safe":
+            return "Thank you for your time today. Your account security is our priority. Have a great day and thank you for banking with us!"
+        elif state.current_case.case == "confirmed_fraud":
+            return "We've taken immediate action to protect your account. You'll receive email confirmations of all the steps we've taken. Thank you for reporting this quickly - it helps us protect all our customers. Have a safe day!"
     
-    if lead.timeline:
-        summary += f"Timeline: {lead.timeline}. "
-    
-    summary += "I'll make sure our team follows up with you soon. Have a great day!"
-    
-    # Generate call notes and qualification score
-    call_notes = {
-        "lead_info": lead_data,
-        "persona": state.persona,
-        "pain_points": state.pain_points,
-        "decision_maker": "yes" if "founder" in lead.role.lower() or "ceo" in lead.role.lower() else "unknown",
-        "budget_mentioned": "no",  # Could be enhanced with transcript analysis
-        "urgency": "medium" if lead.timeline else "low",
-        "fit_score": 75 if lead.is_complete() else 45,
-        "notes": f"Interested in {lead.use_case}. {state.persona} persona detected.",
-        "timestamp": datetime.now().isoformat()
-    }
-    
-    # Save call notes
-    try:
-        path = os.path.join(os.path.dirname(__file__), CALL_NOTES_FILE)
-        notes = []
-        if os.path.exists(path):
-            with open(path, "r") as f:
-                notes = json.load(f)
-        notes.append(call_notes)
-        with open(path, "w") as f:
-            json.dump(notes, f, indent=2)
-    except Exception as e:
-        print(f"Error saving call notes: {e}")
-    
-    # Generate follow-up email
-    email_draft = {
-        "to": lead.email,
-        "subject": f"Great connecting with you, {lead.name}!",
-        "body": f"Hi {lead.name},\n\nThanks for taking the time to learn about Razorpay today! Based on our conversation, I understand you're looking for {lead.use_case or 'payment solutions'} for {lead.company}.\n\nAs discussed, Razorpay can help streamline your payment processes with our easy integration and competitive pricing. I'd love to show you a quick demo of how other companies like yours are using our platform.\n\nWould you be available for a 15-minute call this week?\n\nBest regards,\nRazorpay Sales Team",
-        "timestamp": datetime.now().isoformat()
-    }
-    
-    # Save email draft
-    try:
-        path = os.path.join(os.path.dirname(__file__), EMAILS_FILE)
-        emails = []
-        if os.path.exists(path):
-            with open(path, "r") as f:
-                emails = json.load(f)
-        emails.append(email_draft)
-        with open(path, "w") as f:
-            json.dump(emails, f, indent=2)
-    except Exception as e:
-        print(f"Error saving email draft: {e}")
-    
-    return summary
+    return "Thank you for calling. If you have any other concerns about your account, please don't hesitate to contact us. Have a great day!"
 
-class RazorpaySDRAgent(Agent):
+
+
+class FraudAlertAgent(Agent):
     def __init__(self):
         super().__init__(
-            instructions=f"""
-            You are a friendly Sales Development Representative (SDR) for Razorpay, India's leading payment gateway company.
+            instructions="""
+            You are Alex Thompson, a professional fraud detection representative for SecureBank's fraud department.
             
             🎯 **YOUR ROLE:**
-            - Greet visitors warmly and ask what brought them here
-            - Understand their business needs and use case
-            - Answer questions about Razorpay using the FAQ tool
-            - Collect key lead information naturally during conversation
-            - Provide helpful, accurate information about our payment solutions
+            - Contact customers about suspicious transactions on their accounts
+            - Verify customer identity using security questions
+            - Explain suspicious transaction details clearly
+            - Get customer confirmation about transaction legitimacy
+            - Take appropriate action based on customer response
             
-            📋 **LEAD QUALIFICATION:**
-            Always try to collect: name, company, email, role, use case, team size, timeline
+            🔒 **SECURITY PROTOCOL:**
+            - Always introduce yourself as Alex Thompson from SecureBank's fraud department
+            - Never ask for full card numbers, PINs, or passwords
+            - Use only the security questions provided in the database
+            - Verify identity before discussing transaction details
             
-            🏢 **ABOUT RAZORPAY:**
-            {FAQ_DATA["company"]["description"]}
+            📞 **CALL FLOW:**
+            1. Greet professionally and explain why you're calling
+            2. Ask for customer's name to look up their case
+            3. Ask the security question to verify identity
+            4. If verified, read out suspicious transaction details
+            5. Ask if they made the transaction (yes/no)
+            6. Take appropriate action and explain next steps
+            7. End call professionally
             
             💬 **CONVERSATION STYLE:**
-            - Be conversational and helpful, not pushy
-            - Ask open-ended questions about their business
-            - Use search_faq for product/pricing questions
-            - Use detect_persona to adapt your pitch based on their role
-            - Use collect_lead_info to store responses
-            - Use check_returning_visitor if they provide email
-            - Offer to book_meeting for interested prospects
-            - Use end_call_summary when they're ready to end
+            - Professional, calm, and reassuring
+            - Clear and direct communication
+            - Empathetic to customer concerns
+            - Explain all actions being taken
             
-            Start by greeting them and asking what brought them to learn about Razorpay today.
+            🚨 **IMPORTANT:**
+            - This is a demo system with fake data only
+            - Never handle real financial information
+            - If verification fails, end the call politely
+            
+            Start by introducing yourself as Alex Thompson and explaining you're calling about a suspicious transaction.
             """,
-            tools=[search_faq, collect_lead_info, book_meeting, detect_persona, track_pain_point, check_returning_visitor, end_call_summary],
+            tools=[collect_username, verify_identity, mark_transaction_decision, end_fraud_call],
         )
 
 def prewarm(proc: JobProcess):
@@ -357,10 +251,10 @@ async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {"room": ctx.room.name}
 
     print("\n" + "=" * 25)
-    print("STARTING RAZORPAY SDR SESSION")
-    print(f"Loaded {len(FAQ_DATA['faq'])} FAQ entries")
+    print("STARTING FRAUD ALERT SESSION")
+    print(f"Loaded {len(FRAUD_CASES)} fraud cases")
     
-    userdata = Userdata(sdr_state=SDRState())
+    userdata = Userdata(fraud_state=FraudState())
 
     session = AgentSession(
         stt=deepgram.STT(model="nova-3"),
@@ -378,7 +272,7 @@ async def entrypoint(ctx: JobContext):
     userdata.agent_session = session
     
     await session.start(
-        agent=RazorpaySDRAgent(),
+        agent=FraudAlertAgent(),
         room=ctx.room,
         room_input_options=RoomInputOptions(
             noise_cancellation=noise_cancellation.BVC()
